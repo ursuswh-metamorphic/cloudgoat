@@ -1,0 +1,182 @@
+name: CloudGoat Deploy Scenario
+
+on:
+  workflow_dispatch:
+    inputs:
+      scenario:
+        type: choice
+        description: Select an AWS CloudGoat scenario to deploy
+        required: true
+        options:
+          - agentcore_identity_confusion
+          - beanstalk_secrets
+          - bedrock_agent_hijacking
+          - cloud_breach_s3
+          - codebuild_secrets
+          - data_secrets
+          - detection_evasion
+          - ec2_ssrf
+          - ecs_efs_attack
+          - ecs_privesc_evade_protection
+          - ecs_takeover
+          - federated_console_takeover
+          - glue_privesc
+          - iam_enum_basics
+          - iam_privesc_by_attachment
+          - iam_privesc_by_ec2
+          - iam_privesc_by_key_rotation
+          - iam_privesc_by_rollback
+          - lambda_privesc
+          - rce_web_app
+          - rds_snapshot
+          - s3_version_rollback_via_cfn
+          - secrets_in_the_cloud
+          - sns_secrets
+          - sqs_flag_shop
+          - static
+          - vpc_peering_overexposed
+          - vulnerable_cognito
+          - vulnerable_lambda
+      aws_profile:
+        type: string
+        description: AWS profile name used by CloudGoat Terraform providers
+        required: true
+        default: ci
+      aws_region:
+        type: string
+        description: AWS region override (CloudGoat default is us-east-1)
+        required: true
+        default: us-east-1
+      whitelist_cidr:
+        type: string
+        description: CIDR added to cloudgoat/whitelist.txt
+        required: true
+        default: 1.1.1.1/32
+      user_email:
+        type: string
+        description: Email used by scenarios that require user_email
+        required: true
+        default: cloudgoat-ci@example.com
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloudgoat-deploy-${{ github.event.inputs.scenario }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy ${{ github.event.inputs.scenario }}
+    runs-on: ubuntu-latest
+    env:
+      SCENARIO: ${{ github.event.inputs.scenario }}
+      AWS_PROFILE_NAME: ${{ github.event.inputs.aws_profile }}
+      CLOUDGOAT_AWS_REGION: ${{ github.event.inputs.aws_region }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.11.1
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ github.event.inputs.aws_region }}
+
+      - name: Create shared AWS profile for Terraform
+        run: |
+          mkdir -p ~/.aws
+
+          {
+            echo "[$AWS_PROFILE_NAME]"
+            echo "aws_access_key_id=$AWS_ACCESS_KEY_ID"
+            echo "aws_secret_access_key=$AWS_SECRET_ACCESS_KEY"
+            if [[ -n "${AWS_SESSION_TOKEN:-}" ]]; then
+              echo "aws_session_token=$AWS_SESSION_TOKEN"
+            fi
+          } > ~/.aws/credentials
+
+          {
+            echo "[profile $AWS_PROFILE_NAME]"
+            echo "region=${{ github.event.inputs.aws_region }}"
+            echo "output=json"
+          } > ~/.aws/config
+
+      - name: Install CloudGoat dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install .
+
+      - name: Validate whitelist CIDR format
+        run: |
+          python - <<'PY'
+          import ipaddress
+          import os
+          cidr = "${{ github.event.inputs.whitelist_cidr }}"
+          ipaddress.ip_network(cidr, strict=False)
+          print(f"Validated whitelist CIDR: {cidr}")
+          PY
+
+      - name: Prepare CloudGoat config and whitelist files
+        run: |
+          cat > cloudgoat/config.yml <<EOF
+          - default-profile: ${AWS_PROFILE_NAME}
+          - user_email: ${{ github.event.inputs.user_email }}
+          EOF
+
+          echo "${{ github.event.inputs.whitelist_cidr }}" > cloudgoat/whitelist.txt
+
+      - name: Deploy selected scenario
+        run: |
+          python cloudgoat/cloudgoat.py create "$SCENARIO" --profile "$AWS_PROFILE_NAME"
+
+      - name: Locate deployed scenario directory
+        id: locate
+        run: |
+          INSTANCE_DIR=$(find cloudgoat -maxdepth 1 -mindepth 1 -type d -name "${SCENARIO}_cgid*" | head -n 1)
+
+          if [[ -z "$INSTANCE_DIR" ]]; then
+            echo "Could not find deployed scenario folder for $SCENARIO"
+            exit 1
+          fi
+
+          echo "instance_dir=$INSTANCE_DIR" >> "$GITHUB_OUTPUT"
+          echo "instance_name=$(basename "$INSTANCE_DIR")" >> "$GITHUB_OUTPUT"
+
+      - name: Upload deployed scenario directory
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloudgoat-${{ steps.locate.outputs.instance_name }}
+          path: ${{ steps.locate.outputs.instance_dir }}
+          if-no-files-found: error
+
+      - name: Publish start.txt summary
+        run: |
+          START_FILE="${{ steps.locate.outputs.instance_dir }}/start.txt"
+          {
+            echo "## Scenario deployment output"
+            echo ""
+            echo "Scenario: $SCENARIO"
+            echo "Instance: ${{ steps.locate.outputs.instance_name }}"
+            echo "Region: ${{ github.event.inputs.aws_region }}"
+            echo ""
+            if [[ -f "$START_FILE" ]]; then
+              echo '```'
+              cat "$START_FILE"
+              echo '```'
+            else
+              echo "No start.txt file was generated for this scenario."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -37,7 +37,7 @@ class CloudGoat:
         self.whitelist_path = os.path.join(base_dir, "whitelist.txt")
         self.cg_whitelist = None
 
-        self.aws_region = "us-east-1"
+        self.aws_region = os.getenv("CLOUDGOAT_AWS_REGION", "us-east-1")
         self.cloudgoat_commands = ["config", "create", "destroy", "list", "help"]
         self.non_scenario_instance_dirs = [
             ".git",

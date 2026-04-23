@@ -5,7 +5,7 @@ import unittest
 import unittest.mock
 
 sys.path.insert(
-    0, os.path.abspath(os.path.join(os.path.dirname(os.path.dirname(__file__)), ".."))
+    0, os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
 )
 
 import cloudgoat.core.python.utils
